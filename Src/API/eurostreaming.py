@@ -1,0 +1,290 @@
+from Src.Utilities.info import get_info_tmdb, is_movie, get_info_imdb
+import Src.Utilities.config as config
+from fake_headers import Headers  
+from urllib.parse import quote
+from Src.Utilities.loadenv import load_env 
+from Src.API.extractors.mixdrop import mixdrop
+from Src.API.extractors.deltabit import deltabit 
+from Src.API.extractors.maxstream import maxstream
+from Src.API.extractors.uprot import bypass_uprot
+import re
+import logging
+from Src.Utilities.config import setup_logging
+level = config.LEVEL
+logger = setup_logging(level)
+from bs4 import BeautifulSoup,SoupStrainer
+env_vars = load_env()
+random_headers = Headers()
+try:
+    import pytesseract
+    from PIL import Image
+except Exception as e:
+    print("You can not use ES")
+
+import base64
+from io import BytesIO
+import time
+import os
+import json
+import difflib
+import random
+from Src.Utilities.mfp import build_mfp
+ES_DOMAIN = config.ES_DOMAIN
+
+ES_PROXY = config.ES_PROXY
+proxies = {}
+if ES_PROXY == "1":
+    PROXY_CREDENTIALS = env_vars.get('PROXY_CREDENTIALS')
+    proxy_list = json.loads(PROXY_CREDENTIALS)
+    proxy = random.choice(proxy_list)
+    if proxy == "":
+        proxies = {}
+    else:
+        proxies = {
+            "http": proxy,
+            "https": proxy
+        }   
+ES_ForwardProxy = config.ES_ForwardProxy
+if ES_ForwardProxy == "1":
+    ForwardProxy = env_vars.get('ForwardProxy')
+else:
+    ForwardProxy = ""
+
+
+async def get_maxstream(uprot_link,streams,language,client):
+    maxstream_link = await bypass_uprot(client,uprot_link)
+    if  maxstream_link:
+        streams = await maxstream(maxstream_link,client,streams,'Eurostreaming',language,proxies,ForwardProxy)
+    else:
+        if  maxstream_link == False:
+            return streams 
+        else:
+            streams['streams'].append({'name': f"{Name}",'title': f'{Icon}Eurostreaming\n▶️ Please do the captcha at /uprot in order to be able to play this content! \n Remember to refresh the sources!\nIf you recently did the captcha then dont worry, just refresh the sources', 'url': 'https://github.com/UrloMythus/MammaMia', 'behaviorHints': { 'bingeGroup': 'cb01'}})
+
+    return streams
+
+
+def convert_numbers(base64_data):
+    image_data = base64.b64decode(base64_data)
+    image = Image.open(BytesIO(image_data))
+    custom_config = r'--oem 3 --psm 6 outputbase digits'
+    number_string = pytesseract.image_to_string(image, config=custom_config)
+    return number_string.strip()
+
+
+async def get_numbers(safego_url,client):
+    headers = random_headers.generate()
+    headers['User-Agent'] = 'Mozilla/5.0 (X11; Linux x86_64; rv:146.0) Gecko/20100101 Firefox/146.0'
+    headers['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+    response = await client.get(ForwardProxy + safego_url,headers = headers, proxies = proxies, impersonate = 'chrome')
+    cookies = (response.cookies.get_dict())
+    soup = BeautifulSoup(response.text,'lxml',parse_only=SoupStrainer('img'))
+    numbers = soup.img['src'].split(',')[1]
+    return numbers,cookies
+
+async def real_page(safego_url,client):
+    try:
+        current_directory = os.path.dirname(os.path.abspath(__file__))
+        file_path = os.path.join(current_directory, 'cookie.txt')
+        headers = random_headers.generate()
+        headers['Origin'] = 'https://safego.cc'
+        headers['Referer'] = safego_url
+        headers['User-Agent'] = 'Mozilla/5.0 (X11; Linux x86_64; rv:146.0) Gecko/20100101 Firefox/146.0'
+        
+        with open(file_path, 'r') as file:
+            cookies = file.read()
+        cookies = json.loads(cookies.replace("'", '"'))
+        response = await client.post(ForwardProxy + safego_url,headers=headers, cookies = cookies, proxies = proxies)
+        soup = BeautifulSoup(response.text,'lxml', parse_only=SoupStrainer('a'))
+        if len(soup)>= 1:
+            return soup.a['href']
+        elif 'The requested URL was not found on this server.' not in response.text:
+            logger.info("Getting numbers")
+            numbers,cookies = await get_numbers(safego_url,client)
+            numbers = convert_numbers(numbers)
+            data = {'captch5': numbers}
+            response = await client.post(ForwardProxy + safego_url,headers=headers, data=data, cookies = cookies, proxies = proxies)
+            cap4 = response.headers.get('set-cookie').split(';')[0]
+            cookies[cap4.split('=')[0]] = cap4.split('=')[1]
+            with open(file_path, 'w') as file:
+                file.write(str(cookies))
+            soup = BeautifulSoup(response.text,'lxml', parse_only=SoupStrainer('a'))
+            return soup.a['href']
+    except Exception as e:
+        logger.info(f"ES{e}")
+async def get_host_link(pattern,atag,client):
+    match = re.search(pattern, atag)
+    headers = random_headers.generate()
+    if match:
+        href_value = match.group(1)
+        k = 0
+        while 'safego' not in href_value:
+            response = await client.get(ForwardProxy + href_value, headers={**headers, 'Range': 'bytes=0-0'}, proxies = proxies)
+            href_value = response.url
+            if '%20' in href_value:
+                href_value = href_value.replace('%20','')
+            k+=1
+            if k == 5:
+                break
+        href = await real_page(href_value,client)
+        return href
+async def scraping_links(atag,MFP,MFP_CREDENTIALS,client,streams,language):
+    #Check which hosts are avaiable and extract the links from one of them. Turbovid uses Cloudflare therefore is not avaiable. Maxstream has a captcha. 
+    if "MixDrop" in atag and "DeltaBit" in atag:
+        pattern = r'<a\s+href="([^"]+)"[^>]*[^>]*>DeltaBit</a>'
+        href = await get_host_link(pattern,atag,client)
+        try:
+            streams = await deltabit(href,client,streams,"Eurostreaming",proxies,ForwardProxy,language,'Deltabit')
+        except Exception as e:
+            pattern = r'<a\s+href="([^"]+)"[^>]*rel="noopener"[^>]*>MixDrop</a>'
+            href = await get_host_link(pattern,atag,client)
+            streams,status = await mixdrop(href,client,MFP,MFP_CREDENTIALS,streams,"Eurostreaming",proxies,ForwardProxy,language)
+        return streams
+    if "MixDrop" in atag and  "DeltaBit" not in atag:
+        try:
+            pattern = r'<a\s+href="([^"]+)"[^>]*rel="noopener"[^>]*>MixDrop</a>'
+            href = await get_host_link(pattern,atag,client)
+            streams,status = await mixdrop(href,client,MFP,MFP_CREDENTIALS,streams,"Eurostreaming",proxies,ForwardProxy,language)
+            return streams
+        except Exception as e:
+            return streams
+    if 'DeltaBit' in atag and "MixDrop" not in atag:
+        try:
+            pattern = r'<a\s+href="([^"]+)"[^>]*rel="noopener"[^>]*>DeltaBit</a>'
+            href = await get_host_link(pattern,atag,client)
+            streams = await deltabit(href,client,streams,"Eurostreaming",proxies,ForwardProxy,language,'Deltabit')
+            return streams
+        except Exception as e:
+            return streams
+        
+ 
+        
+    if 'Deltabit' not in atag and 'Mixdrop' not in atag  and 'Turbovid' in atag:
+        try:
+            pattern = r'<a\s+href="([^"]+)"[^>]*rel="noopener"?[^>]*>Turbovid</a>'
+            href = await get_host_link(pattern,atag,client)
+            streams = await deltabit(href,client,streams,"Eurostreaming",proxies,ForwardProxy,language,'Turbovid')
+            return streams
+        except Exception as e:
+            return streams
+    if 'DeltaBit' not in atag and 'MixDrop' not in atag and 'Turbovid' not in atag and 'MaxStream' in atag:
+        try:
+            pattern = r'<a\s+href="([^"]+)"[^>]*rel="noopener"[^>]*>MaxStream</a>'
+            match = re.search(pattern, atag)
+            if match:
+                href_value = match.group(1)
+                streams = await get_maxstream(href_value,streams,language,client)
+            return streams
+        except Exception as e:
+            return streams
+        
+    if 'DeltaBit' not in atag and 'MixDrop' not in atag and 'MaxStream' not in atag:
+        logger.info("Just give up")
+        return streams
+
+async def language_selection(match,MFP,MFP_CREDENTIALS,client,streams):
+        t = 0
+        for episode_details in match:
+            if "href" in episode_details:
+                if t == 0:
+                    language = "\nITA"
+                elif t == 1:
+                    language = "\nSUB-ITA"
+                t +=1
+                streams = await scraping_links(episode_details.split(' – ', 1)[1],MFP,MFP_CREDENTIALS,client,streams,language)
+        return streams
+
+async def episodes_find(description,link,headers,season,episode,MFP,MFP_CREDENTIALS,client,streams):
+    episode = episode.zfill(2)
+    pattern = rf'\b{season}&#215;{episode}\s*(.*?)(?=<br\s*/?>)'
+    match = re.findall(pattern, description)
+    if match:
+        streams = await language_selection(match,MFP,MFP_CREDENTIALS,client,streams)
+    else:
+        link = link.split('-')[0]
+        response = await client.get(f'{link}-links',headers=headers)
+
+        match = re.findall(pattern, response.text)
+        if match:
+            streams = await language_selection(match,MFP,MFP_CREDENTIALS,client,streams)
+
+
+    return streams
+async def search(showname,date,season,episode,MFP,MFP_CREDENTIALS,client,streams):
+    headers = random_headers.generate()
+    showname = showname.replace("'"," ")
+    response = await client.get(ForwardProxy + f"{ES_DOMAIN}/wp-json/wp/v2/search?search={quote(showname)}&_fields=id", proxies = proxies, headers = headers)
+    results = response.json()
+    for i in results:
+        response = await client.get(ForwardProxy + f"{ES_DOMAIN}/wp-json/wp/v2/posts/{i['id']}?_fields=content,title,link", proxies = proxies, headers = headers)
+        if f'ID articolo non valido' in response.text:
+            continue
+        description1 = response.json()
+        title = description1['title']['rendered']
+        description = description1['content']['rendered']
+        link = description1['link']
+        ratio = difflib.SequenceMatcher(None, title, showname).ratio()
+        if ratio >=0.96:
+            streams = await episodes_find(description,link,headers,season,episode,MFP,MFP_CREDENTIALS,client,streams)
+            return streams
+        else:
+            year_pattern = re.compile(r'(?<!/)(19|20)\d{2}(?!/)')
+            match = year_pattern.search(description)
+            if match:
+                year = match.group(0)
+
+            else:
+                pattern = r'<a\s+href="([^"]+)"[^>]*>Continua a leggere</a>'
+                match = re.search(pattern, description)
+                if match:
+                    href_value = match.group(1)
+                    response_2 = await client.get(ForwardProxy + href_value, proxies = proxies, headers = headers)
+                    match = year_pattern.search(response_2.text)
+                    if match:
+                        year = match.group(0)
+            if abs(int(year) - int(date)) <=1:
+                streams = await episodes_find(description,season,episode,MFP,MFP_CREDENTIALS,client,streams)
+                return streams
+    return streams
+
+
+
+async def eurostreaming(streams,id,client,MFP,MFP_CREDENTIALS):
+    try:
+        general = await is_movie(id)
+        ismovie = general[0]
+        clean_id = general[1]
+        type = "Eurostreaming"
+        if ismovie == 0 : 
+            season = str(general[2])
+            episode = str(general[3])
+        elif ismovie == 1:
+            return streams
+        if "tmdb" in id:
+            showname,date = get_info_tmdb(clean_id,ismovie,type)
+        else:
+            showname,date = await get_info_imdb(clean_id,ismovie,type,client)
+        logger.info(f"ES {showname}")
+        streams = await search(showname,date, season,episode,MFP,MFP_CREDENTIALS,client,streams)
+        return streams
+    except Exception as e:
+        logger.warning(f"ES {e}")
+        return streams
+
+
+
+
+async def test_euro():
+    from curl_cffi.requests import AsyncSession
+    async with AsyncSession() as client:
+        results = await eurostreaming({'streams': []},"tt1632701:3:9",client,"0",['test','test'])
+        print(results)
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(test_euro())  
+    #python3 -m Src.API.eurostreaming
+
+'''tt11950864
+'''
